@@ -5,7 +5,7 @@ set -euo pipefail
 SRC="/Volumes/data/downloads/music/nugs"
 DEST_BASE="/Volumes/data/media/music/nuggs"
 DRY_RUN=0
-EYE_D3="/opt/homebrew/bin/eye-d3"   # change if needed
+EYE_D3="/opt/homebrew/Cellar/eye-d3/0.9.8/bin/eyeD3"   # change if needed
 
 # ===== deps =====
 SED="${SED:-$(command -v gsed || command -v sed || true)}"
