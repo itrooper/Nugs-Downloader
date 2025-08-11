@@ -12,7 +12,7 @@ DEST_BASE="/Volumes/data/media/music/nuggs"
 DRY_RUN=0
 
 # Hardcode eye-d3 path (change if your install lives elsewhere)
-EYE_D3="/opt/homebrew/bin/eye-d3"
+EYE_D3="/opt/homebrew/Cellar/eye-d3/0.9.8/bin/eyeD3"
 
 # =========================
 # DEP CHECKS
