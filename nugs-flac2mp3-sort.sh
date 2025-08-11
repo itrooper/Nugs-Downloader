@@ -1,137 +1,111 @@
 #!/usr/bin/env zsh
 set -euo pipefail
 
-# ===== CONFIG =====
+# ========= CONFIG =========
+# Where Nugs-Downloader saves shows (on your Mac, NAS mounted at /Volumes/data):
 SRC="/Volumes/data/downloads/music/nugs"
+# Final MP3 library (your main library, separate under nuggs/):
 DEST_BASE="/Volumes/data/media/music/nuggs"
+# Dry run (1 = no file changes)
 DRY_RUN=0
-EYE_D3="/opt/homebrew/Cellar/eye-d3/0.9.8/bin/eyeD3"   # change if needed
 
-# ===== deps =====
+# Explicit eyeD3 path (from your Homebrew Cellar)
+EYE_D3="/opt/homebrew/Cellar/eye-d3/0.9.8/bin/eyeD3"
+
+# ========= DEPS =========
 SED="${SED:-$(command -v gsed || command -v sed || true)}"
-[[ -n "${SED:-}" ]] || { echo "Need sed/gsed"; exit 1; }
-need() { if [[ "$1" == /* ]]; then [[ -x "$1" ]] || { echo "Missing: $1"; exit 1; }; else command -v "$1" >/dev/null || { echo "Missing: $1"; exit 1; }; fi }
+[[ -n "${SED:-}" ]] || { echo "Need sed/gsed (brew install gnu-sed)"; exit 1; }
+
+need() { command -v "$1" >/dev/null 2>&1 || { echo "Missing dependency: $1"; exit 1; }; }
 need ffmpeg
 need mp3gain
-need "$EYE_D3"
+[[ -x "$EYE_D3" ]] || { echo "Missing eye-d3 at $EYE_D3"; exit 1; }
 [[ -d "$SRC" ]] || { echo "Source not found: $SRC"; exit 1; }
 mkdir -p "$DEST_BASE"
 
 # zsh nullglob (bash shopt equivalent)
 setopt NULL_GLOB
 
-# ===== helpers =====
-normalize_delims() { "$SED" 's/ – / - /g; s/ — / - /g'; }
-fmt_date_iso_to_mmddyyyy() { date -jf "%Y-%m-%d" "$1" "+%m-%d-%Y" 2>/dev/null || printf "%s" "$1"; }
-clean_component() {
+# ========= HELPERS =========
+trim(){ print -r -- "$1" | "$SED" 's/^[[:space:]]\+//; s/[[:space:]]\+$//'; }
+clean_component(){
   print -r -- "$1" | "$SED" '
     s~/~, ~g; s/[[:cntrl:]]//g; s/[*?<>|"]//g;
     s/[[:space:]]\{1,\}$//; s/^[[:space:]]\{1,\}//; s/[[:space:]]\{2,\}/ /g;'
 }
-pick_cover() { local d="$1"; for c in cover.jpg Cover.jpg COVER.jpg folder.jpg Folder.jpg FOLDER.jpg cover.png Cover.png; do [[ -f "$d/$c" ]] && { print -r -- "$d/$c"; return; }; done }
+mmddyyyy(){ local iso="${1:0:10}"; date -jf "%Y-%m-%d" "$iso" "+%m-%d-%Y" 2>/dev/null || printf "%s" "$iso"; }
+pick_cover(){ local d="$1"; for c in cover.jpg Cover.jpg COVER.jpg folder.jpg Folder.jpg FOLDER.jpg cover.png Cover.png; do
+  [[ -f "$d/$c" ]] && { print -r -- "$d/$c"; return; }; done }
 
-# Extract tags from first media file if folder parsing is ambiguous
-probe_tags() {
+# Extract tags from a file (returns: ARTIST \n ALBUM \n DATE)
+probe_tags(){
   local f="$1"
-  local v; v=($(ffprobe -v error -select_streams a:0 -show_entries format_tags=artist,album,date \
-               -of default=nw=1:nk=1 "$f" 2>/dev/null || true))
-  # ffprobe prints each value on its own line in order artist/album/date
-  print -r -- "${v[1]:-}" "${v[2]:-}" "${v[3]:-}"
+  ffprobe -v error -select_streams a:0 \
+    -show_entries format_tags=artist,album,date \
+    -of default=nw=1:nk=1 "$f" 2>/dev/null || true
 }
 
-# Robust folder parser
-parse_showdir() {
-  local base="$1"
-  local norm="$(print -r -- "$base" | normalize_delims)"
-  local -a toks; IFS=$'\n' toks=($(print -r -- "$norm" | awk -F' - ' '{for(i=1;i<=NF;i++)print $i}'))
-  local raw_date="" artist="" venue=""
-  for t in "${toks[@]}"; do
-    if [[ "$t" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then raw_date="$t"; continue; fi
-    if [[ "$t" =~ ^[0-9]{2}[_-][0-9]{2}[_-]([0-9]{2}|[0-9]{4})$ ]]; then
-      # convert 08_02_25 → 2025-08-02 best effort
-      local m="${t:0:2}"; local d="${t:3:2}"; local y="${t:6}"
-      [[ ${#y} -eq 2 ]] && y="20$y"
-      raw_date="$y-$m-$d"
-      continue
-    fi
-  done
-  # Guess the rest: take the longest alpha token as venue, another as artist
-  local -a rest; for t in "${toks[@]}"; do [[ "$t" != "$raw_date" && -n "$t" ]] && rest+=("$t"); done
-  if (( ${#rest[@]} >= 2 )); then
-    # prefer token with comma as venue
-    for t in "${rest[@]}"; do [[ "$t" == *","* ]] && venue="$t"; done
-    [[ -z "$venue" ]] && venue="${rest[-1]}"
-    for t in "${rest[@]}"; do [[ "$t" != "$venue" ]] && { artist="$t"; break; }; done
-  elif (( ${#rest[@]} == 1 )); then
-    artist="${rest[1]}"; venue="Unknown Venue"
+# Parse album like "YYYY-MM-DD Venue, City, ST" → iso_date + venue
+parse_album_date_venue(){
+  local album="$1"
+  if [[ "$album" =~ ^([0-9]{4})[-_/]([0-9]{2})[-_/]([0-9]{2})[[:space:]]+(.+)$ ]]; then
+    print -r -- "${match[1]}-${match[2]}-${match[3]}" "${match[4]}"
+  else
+    print -r -- "" "$album"
   fi
-  print -r -- "$raw_date" "$artist" "$venue"
 }
 
 echo "Scanning: $SRC"
 for showdir in "$SRC"/*(/); do
-  showbase="${showdir:t}"
-  # Try folder parse
-  parts=($(parse_showdir "$showbase"))
-  raw_date="${parts[1]:-}"
-  artist="${parts[2]:-}"
-  venue="${parts[3]:-}"
+  # choose a probe file: prefer FLAC, else MP3
+  probe=""
+  for f in "$showdir"/*.flac "$showdir"/*.mp3; do probe="$f"; break; done
+  [[ -n "$probe" ]] || { echo "Skip (no media): ${showdir:t}"; continue; }
 
-  # If date/artist/venue look weak, probe first media file
-  test_file=""
-  for f in "$showdir"/*.flac "$showdir"/*.mp3; do test_file="$f"; break; done
-  if [[ -n "$test_file" ]]; then
-    tags=($(probe_tags "$test_file"))
-    [[ -z "$artist" && -n "${tags[1]:-}" ]] && artist="${tags[1]}"
-    # album often like "YYYY-MM-DD Venue, City, ST" → peel date & venue
-    if [[ -z "$venue" && -n "${tags[2]:-}" ]]; then
-      alb="${tags[2]}"
-      # try to split album into date + venue
-      if [[ "$alb" =~ ^([0-9]{4}-[0-9]{2}-[0-9]{2})[[:space:]]+(.+)$ ]]; then
-        [[ -z "$raw_date" ]] && raw_date="${match[1]}"
-        venue="${match[2]}"
-      else
-        venue="$alb"
-      fi
-    fi
-    [[ -z "$raw_date" && -n "${tags[3]:-}" ]] && raw_date="${tags[3]}"
-  fi
+  # Read tags
+  vals=($(probe_tags "$probe"))
+  artist_raw="${vals[1]:-Unknown Artist}"
+  album_raw="${vals[2]:-}"
+  date_tag="${vals[3]:-}"   # may be empty or "2025-08-02..."
 
-  # Defaults if still missing
-  [[ -z "$artist" ]] && artist="Unknown Artist"
-  [[ -z "$venue"  ]] && venue="Unknown Venue"
+  # Peel date & venue from album when possible
+  pair=($(parse_album_date_venue "$album_raw"))
+  iso_from_album="${pair[1]:-}"
+  venue_raw="${pair[2]:-Unknown Venue}"
 
-  dest_date="$(fmt_date_iso_to_mmddyyyy "$raw_date")"
-  artist_clean="$(clean_component "$artist")"
-  venue_clean="$(clean_component "$venue")"
-  album_dir="${venue_clean} - ${dest_date}"
-  dest_dir="${DEST_BASE}/${artist_clean}/${album_dir}"
+  iso_date="${iso_from_album:-${date_tag:0:10}}"
+  [[ -z "$iso_date" ]] && iso_date="1900-01-01"
+
+  # Final strings
+  artist_clean="$(clean_component "$(trim "$artist_raw")")"
+  venue_clean="$(clean_component "$(trim "$venue_raw")")"
+  date_out="$(mmddyyyy "$iso_date")"
+  year="${iso_date:0:4}"
+
+  dest_dir="${DEST_BASE}/${artist_clean}/${venue_clean} - ${date_out}"
   [[ $DRY_RUN -eq 1 ]] || mkdir -p "$dest_dir"
+  echo "▶︎ ${artist_clean} — ${venue_clean} - ${date_out}"
 
-  echo "▶︎ Processing: $artist_clean — $album_dir"
-
-  # Convert FLAC -> MP3 (keep base names)
-  for f in "$showdir"/*.flac; do
-    mp3="${dest_dir}/${f:t:r}.mp3"
-    echo "   • Converting: ${f:t} → ${mp3:t}"
-    [[ $DRY_RUN -eq 1 ]] || ffmpeg -loglevel error -y -i "$f" -vn -c:a libmp3lame -b:a 320k -map_metadata 0 "$mp3"
+  # 1) Convert FLAC → MP3 320 into dest (keep base names)
+  for fl in "$showdir"/*.flac; do
+    mp3="${dest_dir}/${fl:t:r}.mp3"
+    echo "   • Converting: ${fl:t} → ${mp3:t}"
+    [[ $DRY_RUN -eq 1 ]] || ffmpeg -loglevel error -y -i "$fl" -vn \
+      -c:a libmp3lame -b:a 320k -map_metadata 0 "$mp3"
   done
 
-  # Move any existing MP3s in source into dest
+  # 2) Move any MP3s that already exist in source
   for m in "$showdir"/*.mp3; do
     echo "   • Moving MP3: ${m:t}"
     [[ $DRY_RUN -eq 1 ]] || mv -n "$m" "$dest_dir/"
   done
 
-  # Tag/rename
+  # 3) Tag/rename MP3s in dest
   cover="$(pick_cover "$showdir")"; [[ -z "$cover" ]] && cover="$(pick_cover "$dest_dir")"
-  year="${raw_date:0:4}"
   track_re='^([0-9]{1,2})[[:space:]]*[-_.][[:space:]]*(.*)\.mp3$'
   i=1
-  for f in "$dest_dir"/*.mp3; do
-    base="${f:t}"
-    title="${base%.*}"
-    track=""
+  for f in "$dest_dir"/*.mp3(N); do
+    base="${f:t}"; title="${base%.*}"; track=""
     if [[ "$base" =~ $track_re ]]; then
       track="${match[1]}"; title="${match[2]}"
     else
@@ -141,27 +115,37 @@ for showdir in "$SRC"/*(/); do
       [[ $DRY_RUN -eq 1 ]] || mv -n "$f" "$new"
       f="$new"
     fi
-    title="$(print -r -- "$title" | "$SED" 's/^[[:space:]-]*//; s/[[:space:]]+$//')"
-    args=(--artist "$artist_clean" --album "$album_dir" --album-artist "$artist_clean" --genre "Live")
-    [[ -n "$year" ]]  && args+=(--recording-date "$year" --release-year "$year")
-    [[ -n "$track" ]] && args+=(--track "$track")
-    [[ -n "$title" ]] && args+=(--title "$title")
+    title="$(trim "$title")"
+    args=(--artist "$artist_clean" --album "${venue_clean} - ${date_out}" --album-artist "$artist_clean" --genre "Live"
+          --recording-date "$year" --release-year "$year" --track "$track" --title "$title")
     if [[ $DRY_RUN -eq 0 ]]; then
-      if [[ -n "$cover" ]]; then "$EYE_D3" --quiet --add-image "$cover:FRONT_COVER" "${args[@]}" "$f" >/dev/null || true
-      else "$EYE_D3" --quiet "${args[@]}" "$f" >/dev/null || true; fi
+      if [[ -n "$cover" ]]; then
+        "$EYE_D3" --quiet --add-image "$cover:FRONT_COVER" "${args[@]}" "$f" >/dev/null || true
+      else
+        "$EYE_D3" --quiet "${args[@]}" "$f" >/dev/null || true
+      fi
     fi
   done
 
-  # Album gain
+  # 4) Album gain (lossless frame gain + APEv2 tags)
   if ls "$dest_dir"/*.mp3 >/dev/null 2>&1; then
     echo "   • mp3gain (album mode)"
     [[ $DRY_RUN -eq 1 ]] || (mp3gain -a -k -q "$dest_dir"/*.mp3 >/dev/null 2>&1 || true)
   fi
 
-  # Extras + cleanup
-  for ext in jpg JPG png PNG txt TXT; do for a in "$showdir"/*.$ext; do [[ -e "$a" ]] && { echo "   • Moving extra: ${a:t}"; [[ $DRY_RUN -eq 1 ]] || mv -n "$a" "$dest_dir/"; }; done; done
-  for f in "$showdir"/*.flac; do echo "   • Deleting FLAC: ${f:t}"; [[ $DRY_RUN -eq 1 ]] || rm -f "$f"; done
+  # 5) Extras + cleanup
+  for ext in jpg JPG png PNG txt TXT; do
+    for a in "$showdir"/*.$ext; do
+      [[ -e "$a" ]] || continue
+      echo "   • Moving extra: ${a:t}"
+      [[ $DRY_RUN -eq 1 ]] || mv -n "$a" "$dest_dir/"
+    done
+  done
+  for fl in "$showdir"/*.flac; do
+    echo "   • Deleting FLAC: ${fl:t}"
+    [[ $DRY_RUN -eq 1 ]] || rm -f "$fl"
+  done
   [[ $DRY_RUN -eq 1 ]] || rmdir "$showdir" 2>/dev/null || true
 
-  echo "✅  ${artist_clean}/${album_dir}"
+  echo "✅  ${artist_clean}/${venue_clean} - ${date_out}"
 done
