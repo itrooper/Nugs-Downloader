@@ -1,9 +1,9 @@
 {
     "email": "jlev2.0@gmail.com",
     "password": "Z3q#7vd7^76$",
-    "format": 4,
+    "format": 2,
     "videoFormat": 5,
-    "outPath": "/share/CACHEDEV2_DATA/data/downloads/music/nugs",
+    "outPath": "/Volumes/data/downloads/music/nugs",
   	"downloadArtwork": true,
   	"downloadText": true,
   	"downloadVideo": false,
