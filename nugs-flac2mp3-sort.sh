@@ -4,8 +4,8 @@ set -euo pipefail
 # ========= CONFIG =========
 # Where Nugs-Downloader saves shows (on your Mac, NAS mounted at /Volumes/data):
 SRC="/Volumes/data/downloads/music/nugs"
-# Final MP3 library (your main library, separate under nuggs/):
-DEST_BASE="/Volumes/data/media/music/nuggs"
+# Final MP3 library (your main library, separate under nugs/):
+DEST_BASE="/Volumes/data/media/music/nugs"
 # Dry run (1 = no file changes)
 DRY_RUN=0
 
