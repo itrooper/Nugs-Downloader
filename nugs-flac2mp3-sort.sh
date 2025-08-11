@@ -11,21 +11,30 @@ DEST_BASE="/Volumes/data/media/music/nuggs"
 # Set to 1 to simulate (no file changes)
 DRY_RUN=0
 
+# Hardcode eye-d3 path (change if your install lives elsewhere)
+EYE_D3="/opt/homebrew/bin/eye-d3"
+
 # =========================
 # DEP CHECKS
 # =========================
-# pick GNU sed if present, else BSD sed
+# Choose GNU sed if present, else BSD sed
 SED="${SED:-$(command -v gsed || command -v sed || true)}"
 if [[ -z "${SED:-}" ]]; then
-  echo "Error: neither gsed nor sed found in PATH."
-  echo "Install with: brew install gnu-sed"
-  exit 1
+  echo "Error: neither gsed nor sed found. Try: brew install gnu-sed"; exit 1
 fi
 
-need() { command -v "$1" >/dev/null 2>&1 || { echo "Missing dependency: $1"; exit 1; }; }
+need() {
+  # Accept either a command name or a full path
+  if [[ "$1" == /* ]]; then
+    [[ -x "$1" ]] || { echo "Missing dependency (not executable): $1"; exit 1; }
+  else
+    command -v "$1" >/dev/null 2>&1 || { echo "Missing dependency: $1"; exit 1; }
+  fi
+}
+
 need ffmpeg
-need eye-d3
 need mp3gain
+need "$EYE_D3"
 
 [[ -d "$SRC" ]] || { echo "Source not found: $SRC"; exit 1; }
 mkdir -p "$DEST_BASE"
@@ -132,9 +141,9 @@ find "$SRC" -mindepth 1 -maxdepth 1 -type d | while IFS= read -r showdir; do
 
     if [[ $DRY_RUN -eq 0 ]]; then
       if [[ -n "$cover" ]]; then
-        eyeD3 --quiet --add-image "$cover:FRONT_COVER" "${args[@]}" "$f" >/dev/null || true
+        "$EYE_D3" --quiet --add-image "$cover:FRONT_COVER" "${args[@]}" "$f" >/dev/null || true
       else
-        eyeD3 --quiet "${args[@]}" "$f" >/dev/null || true
+        "$EYE_D3" --quiet "${args[@]}" "$f" >/dev/null || true
       fi
     fi
   done
